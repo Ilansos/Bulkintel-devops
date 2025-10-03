@@ -1,0 +1,18 @@
+{% extends "auth_app/base.html" %}
+{% load static %}
+
+{% block title %}500 – Server error{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <div class="centered-content">
+        <img src="{% static 'app/icons/favicon.ico' %}" alt="BulkIntel Icon">
+        <h2>500 – Server error</h2>
+    </div>
+
+    <p>Something went wrong on our side. Please try again later.<br>
+       Maybe try the login page?</p>
+
+    <a href="{% url 'login' %}" class="btn">Back to login</a>
+</div>
+{% endblock %}

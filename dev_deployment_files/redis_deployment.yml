@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bulkintel-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+      annotations:
+        # --- Vault Agent injection ---
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "bulkintel-role"
+
+        # Render a config file from the secret at key-value/redis-auth
+        vault.hashicorp.com/agent-inject-secret-redis-config: "key-value/data/bulkintel"
+        vault.hashicorp.com/agent-inject-file-redis-config: "redis.conf"
+        vault.hashicorp.com/agent-inject-perms-redis-config: "0400"
+        vault.hashicorp.com/agent-run-as-user: "999"
+        vault.hashicorp.com/agent-run-as-group: "999"
+        vault.hashicorp.com/agent-pre-populate: "true"
+        vault.hashicorp.com/agent-init-first: "true"
+
+        # Template for redis.conf using KV v2 (note .Data.data)
+        vault.hashicorp.com/agent-inject-template-redis-config: |
+          {{- with secret "key-value/data/bulkintel" -}}
+          # Listen on all interfaces (cluster-internal only)
+          bind 0.0.0.0
+          port 6379
+
+          # Disable legacy "requirepass"; use ACL users instead
+          # Disable the default user to force AUTH with a username
+          user default off
+
+          # App user with full access; password comes from Vault
+          user {{ .Data.data.REDIS_USER }} on >{{ .Data.data.REDIS_PASSWORD }} ~* +@all
+          {{- end }}
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsNonRoot: true
+        runAsGroup: 999
+      serviceAccountName: bulkintel-vault-sa
+      automountServiceAccountToken: true
+      containers:
+      - name: redis
+        image: redis:8.2.0
+        command: ["redis-server"]
+        args: ["/vault/secrets/redis.conf"]
+        securityContext:
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
+        resources:
+          requests:
+            memory: "48Mi"
+            cpu: "30m"
+            ephemeral-storage: "256Mi"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+            ephemeral-storage: "1Gi"
+        ports:
+        - containerPort: 6379
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 30
+          failureThreshold: 5
+        readinessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 30
+          failureThreshold: 5

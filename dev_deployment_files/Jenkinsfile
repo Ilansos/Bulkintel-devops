@@ -1,0 +1,599 @@
+pipeline{
+    agent{
+        node{
+            label 'ssh-agent1'
+        }
+    }
+    triggers{
+        pollSCM 'H/5 * * * *'
+    }
+    environment {
+        REGISTRY = 'git.example.com'                 // no scheme (no https://) here
+        OWNER    = 'jenkins'                        // Gitea user/org/namespace
+        IMAGE    = 'bulkintel-dev'          // image (often same as repo)
+        TAG      = "${env.GIT_COMMIT}" 
+        TRIVY_PKG_TYPES = 'os,library'              // or 'os' only (new flag name; old --vuln-type is deprecated)
+        APPROVERS  = 'JenkinsAdmin'
+        GITEA_API = "https://${REGISTRY}/api/v1"
+        GITEA_OWNER  = 'jenkins'           // <- set to the repo owner in Gitea
+        GITEA_REPO   = 'Bulk_Intel'   // <- repo name only
+        GITEA_CRED   = 'gitea-username-password'    
+        // optional, comma-separated label names to apply
+        GITEA_FAILURE_LABELS = 'ci-failure,jenkins' 
+        GITEA_UNSTABLE_LABELS = 'ci-failure,jenkins'
+        SUCCESS_EMAIL = 'admin@example.com' // email to notify on success
+        NAMESPACE = 'bulkintel-dev'  // k8s namespace to deploy into
+    }
+    stages {
+        stage('Prepare workspace') {
+            steps {
+                // Jenkins does an implicit 'checkout scm' before the first stage.
+                // Stash everything so we can use it on another agent later.
+                stash name: 'src', includes: '**/*'
+            }
+        }
+        stage('SonarQube scan') {
+            steps {
+                script {
+                def scannerHome = tool 'Sonarqube-scanner'      // from Tools
+                withSonarQubeEnv('Sonarqube-Server') {            // from Configure System
+                    sh """
+                        ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=${env.JOB_BASE_NAME} \
+                            -Dsonar.projectName=${env.JOB_BASE_NAME} \
+                            -Dsonar.sources=. \
+                            -Dsonar.python.version=3.12 \
+                            -Dsonar.python.coverage.reportPaths=coverage.xml \
+                            -Dsonar.python.xunit.reportPath=test-results.xml
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                waitForQualityGate abortPipeline: true     // fails build on RED gate
+                }
+            }
+        }
+        stage('Build docker image') {
+            steps {
+                script {
+                // Def ine image reference for later stages
+                def imageRef = "${REGISTRY}/${OWNER}/${IMAGE}:${TAG}"
+
+                // URL with scheme is required here:
+                docker.withRegistry("https://${REGISTRY}", 'gitea-username-password') {
+                    def img = docker.build(imageRef)
+                    }
+                
+                env.IMAGE_REF = imageRef  // make available to later stages
+                }
+            }
+        }
+        stage('Scan image with Trivy (fail on High/Critical)') {
+            steps {
+                sh """#!/usr/bin/env bash
+                set -euo pipefail
+
+                trivy image "${REGISTRY}/${OWNER}/${IMAGE}:${TAG}" \
+                    --cache-dir "/home/jenkins/agent/caches/.trivy_cache" \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --ignorefile "dev_deployment_files/.trivyignore.yml" \
+                    --format table | tee trivy-table.txt
+
+                # Also keep JSON for artifacts / code scanning
+                trivy image "${REGISTRY}/${OWNER}/${IMAGE}:${TAG}" \
+                    --cache-dir "/home/jenkins/agent/caches/.trivy_cache" \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --ignorefile "dev_deployment_files/.trivyignore.yml" \
+                    --format json \
+                    --output "trivy-report.json"
+                """
+            }
+        }
+        stage('Vulnerability gate') {
+            steps {
+                script {
+                    // requires: Pipeline Utility Steps plugin
+                    def report = readJSON file: 'trivy-report.json'
+                    def vulns = (report?.Results ?: [])
+                                    .collectMany { it?.Vulnerabilities ?: [] }
+
+                    def crit = vulns.count { it?.Severity == 'CRITICAL' }
+                    def high = vulns.count { it?.Severity == 'HIGH' }
+
+                    if (crit > 0) { // Return to 0 after testing
+                        error "Failing build: ${crit} CRITICAL vulnerabilities."
+                    }
+                    if (high > 5) {
+                        currentBuild.result = 'UNSTABLE'
+                        input message: "Found ${high} HIGH vulns. Approve to continue?",
+                            ok: 'Approve',
+                            submitter: APPROVERS
+                    }
+                }
+            }
+        }
+        stage('Scan Misconfigurations with Trivy') {
+            steps{
+                sh """#!/usr/bin/env bash
+                set -euo pipefail
+
+                mkdir -p dev_deployment_files/trivy-reports
+
+                trivy config \
+                    --severity HIGH,CRITICAL \
+                    --ignorefile dev_deployment_files/.trivyignore.yml \
+                    --format json \
+                    --output dev_deployment_files/trivy-reports/misconfigurations.json \
+                    ./
+                """
+            }
+        }
+        stage('Misconfiguration gate') {
+            steps {
+                script {
+                // File can be overridden via env.TRIVY_CONFIG_REPORT
+                def reportFile = env.TRIVY_CONFIG_REPORT ?: 'dev_deployment_files/trivy-reports/misconfigurations.json'
+
+                // Parse Trivy config/misconfig JSON
+                def report = readJSON file: reportFile
+                def results = (report?.Results ?: [])
+
+                // Flatten all FAILED misconfigs and carry their Target along
+                def failed = []
+                results.each { r ->
+                    (r?.Misconfigurations ?: []).each { m ->
+                    if ((m?.Status ?: '').toString().toUpperCase() == 'FAIL') {
+                        failed << [
+                        target   : (r?.Target ?: r?.ArtifactName ?: 'unknown'),
+                        cls      : r?.Class,
+                        typ      : r?.Type,
+                        id       : m?.ID,
+                        avd      : m?.AVDID,
+                        title    : m?.Title,
+                        severity : (m?.Severity ?: 'UNKNOWN').toString().toUpperCase(),
+                        url      : m?.PrimaryURL
+                        ]
+                    }
+                    }
+                }
+
+                // Count by severity (ensure all keys exist)
+                def counts = failed.countBy { it.severity }
+                ['CRITICAL','HIGH','MEDIUM','LOW','UNKNOWN'].each { s ->
+                    counts[s] = (counts[s] ?: 0) as int
+                }
+
+                // Human-friendly summary (top 10)
+                def topLines = failed.take(10).collect { f ->
+                    "- ${f.id} [${f.severity}] ${f.title} @ ${f.target}${f.url ? " (${f.url})" : ''}"
+                }.join("\n")
+
+                echo """
+🔎 Trivy Misconfig summary (${reportFile})
+CRITICAL=${counts.CRITICAL}, HIGH=${counts.HIGH}, MEDIUM=${counts.MEDIUM}, LOW=${counts.LOW}, UNKNOWN=${counts.UNKNOWN}
+Top issues:
+${topLines}
+""".trim()
+
+                // Gate logic
+                if (counts.CRITICAL > 0) {
+                    error "Failing build: ${counts.CRITICAL} CRITICAL misconfiguration(s)."
+                    }
+                if (counts.HIGH > 5) {
+                    currentBuild.result = 'UNSTABLE'
+                    input message: "Found ${counts.HIGH} HIGH misconfiguration(s). Approve to continue?",
+                        ok: 'Approve',
+                        submitter: APPROVERS
+                    }
+                }
+            }
+        }
+        stage('Scan Vendor Images') {
+            steps {
+                script {
+                    // Run the scan_images.sh script
+                    sh "cd dev_deployment_files && bash ./scan_images.sh ./*.yml"
+                }
+            }
+        }
+        stage('Vulnerability gate for vendor images') {
+            steps {
+                script {
+                    def reports = findFiles(glob: 'dev_deployment_files/trivy-reports/*.json')
+                    if (reports.size() == 0) {
+                        echo "No Trivy reports found under ./trivy-reports"
+                        return
+                    }
+
+                    int critTotal = 0
+                    int highTotal = 0
+                    def perFile = []
+
+                    reports.each { f ->
+                        def report = readJSON file: f.path
+                        def vulns = (report?.Results ?: []).collectMany { it?.Vulnerabilities ?: [] }
+                        def c = vulns.count { (it?.Severity ?: '').toUpperCase() == 'CRITICAL' }
+                        def h = vulns.count { (it?.Severity ?: '').toUpperCase() == 'HIGH' }
+                        perFile << [file: f.path, total: vulns.size(), crit: c, high: h]
+                        critTotal += c
+                        highTotal += h
+                    }
+
+                    echo "Trivy summary across ${reports.size()} report(s): CRITICAL=${critTotal}, HIGH=${highTotal}"
+                    perFile.each { r ->
+                        echo "${r.file} -> total=${r.total}, CRITICAL=${r.crit}, HIGH=${r.high}"
+                        if (r.crit > 0 || r.high > 0) {
+                            def raw = readFile(file: r.file)
+                            def pretty = groovy.json.JsonOutput.prettyPrint(raw)
+                            echo "----- BEGIN ${r.file} -----\n${pretty}\n----- END ${r.file} -----"
+                        }
+                    }
+
+                    // Allow overriding via env var; default threshold = 0
+                    int CRIT_THRESHOLD = (env.CRIT_THRESHOLD ?: '0') as int
+
+                    if (critTotal > CRIT_THRESHOLD) {
+                        error "Failing build: ${critTotal} CRITICAL vulnerabilities across ${reports.size()} report(s) (threshold ${CRIT_THRESHOLD})."
+                    }
+
+                    if (highTotal > 5) {
+                        currentBuild.result = 'UNSTABLE'
+                        input message: "Found ${highTotal} HIGH vulnerabilities across ${reports.size()} report(s). Approve to continue?",
+                            ok: 'Approve',
+                            submitter: env.APPROVERS
+                    }
+                }
+            }
+        }
+        stage('Push Docker image') {
+            steps {
+                script {
+                // URL with scheme is required here:
+                docker.withRegistry("https://${REGISTRY}", 'gitea-username-password') {
+                    docker.image(env.IMAGE_REF).push()
+                    }
+                }
+            }
+        }
+        stage('Create Namespace') {
+            agent {
+                node { label 'kubectl-agent' }
+            }
+            steps{
+                unstash 'src'
+                sh'''#!/usr/bin/env bash
+                set -euo pipefail
+                export KUBECONFIG="/home/jenkins/.kube/kube.yaml"
+                kubectl apply -f dev_deployment_files/namespace.yml
+                kubectl wait ns/${NAMESPACE} --for=jsonpath='{.status.phase}'=Active --timeout=60s
+                '''
+            }
+        }
+        stage('Create imagePullSecret') {
+            agent {
+                node { label 'kubectl-agent' }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                credentialsId: 'gitea-username-password',
+                usernameVariable: 'REG_USER',
+                passwordVariable: 'REG_PASS'
+                )]) {
+                sh'''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export KUBECONFIG="/home/jenkins/.kube/kube.yaml"
+                    NS=${NAMESPACE}
+                    SECRET_NAME="pull-image-secret"
+                    REGISTRY="${REGISTRY}"              
+                    SERVER="https://${REGISTRY}"        
+
+                    kubectl -n "$NS" create secret docker-registry "$SECRET_NAME" \
+                    --docker-server="$SERVER" \
+                    --docker-username="$REG_USER" \
+                    --docker-password="$REG_PASS" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                '''
+                }
+            }
+        }
+        stage('Deploy to k8s') {
+            agent {
+                node { label 'kubectl-agent' }
+            }
+            steps {
+                sh '''#!/usr/bin/env bash
+                set -Eeuo pipefail
+                export KUBECONFIG="/home/jenkins/.kube/kube.yaml"
+                # Update the image in the manifest
+                yq -i '(.spec.template.spec.containers[] | select(.name=="bulkintel")).image = env(IMAGE_REF)' dev_deployment_files/deployment.yml
+                
+
+                diagnose() {
+                    local kind="$1" name="$2"
+                    echo "[DIAG] ${kind}/${name}"
+                    kubectl -n "$NAMESPACE" describe "${kind}/${name}" || true
+                    # Optional: pods by app=<name> label
+                    kubectl  get pod -l "app=${name}" -n "$NAMESPACE" -o wide || true
+                    kubectl -n "$NAMESPACE" describe pod -l "app=${name}" || true
+                }
+
+                apply_with_auto_rollback() {
+                    local kind="$1" name="$2" file="$3" timeout="$4"
+
+                    echo "[APPLY] ${kind}/${name} from ${file}"
+                    kubectl apply -f "$file"
+
+                    echo "[WAIT] ${kind}/${name} --timeout=${timeout}"
+                    # Capture both output and exit code; 'tsh kubectl' can sometimes return 0 on timeout.
+                    local out rc
+                    if ! out="$(kubectl rollout status "${kind}/${name}" -n "$NAMESPACE" --timeout="$timeout" 2>&1)"; then
+                        rc=$?
+                    else
+                        rc=0
+                    fi
+                    echo "$out"
+
+                    if [[ $rc -ne 0 || "$out" == *"timed out waiting for the condition"* ]]; then
+                        echo "[FAIL] ${kind}/${name} rollout failed/timed out → rolling back"
+                        diagnose "$kind" "$name"
+                        kubectl rollout undo "${kind}/${name}" -n "$NAMESPACE" || true
+                        exit 1
+                    fi
+
+                    echo "[OK] ${kind}/${name} rolled out"
+                }
+
+                # ---- Apply in order ----
+                kubectl apply -f dev_deployment_files/service_account.yml;            
+                sleep 2
+                kubectl apply -f dev_deployment_files/postgres_service.yml;           
+                sleep 2
+                apply_with_auto_rollback "statefulset" "postgres-statefulset" "dev_deployment_files/postgres_deployment.yml" "10m"
+
+                kubectl apply -f dev_deployment_files/redis_service.yml;              
+                sleep 2
+                apply_with_auto_rollback "deploy" "redis" "dev_deployment_files/redis_deployment.yml" "5m"
+
+                kubectl apply -f dev_deployment_files/bulkintel_service.yml;          
+                sleep 2
+                apply_with_auto_rollback "deploy" "bulkintel" "dev_deployment_files/deployment.yml" "5m"
+                kubectl apply -f dev_deployment_files/bulkintel_hpa.yml;              
+                sleep 2
+
+                kubectl apply -f dev_deployment_files/nginx_log_exporter_conf.yml;    
+                sleep 2
+                kubectl apply -f dev_deployment_files/nginx_config.yml;               
+                sleep 2
+                kubectl apply -f dev_deployment_files/nginx_service.yml;              
+                sleep 2
+                apply_with_auto_rollback "deploy" "nginx" "dev_deployment_files/nginx_deployment.yml" "5m"
+                kubectl apply -f dev_deployment_files/nginx_hpa.yml
+
+                echo "[DEPLOY] All rollouts successful."
+                '''
+                }
+            }
+            stage('Remove old images') {
+                steps {
+                    script {
+                        // Remove old images to save space
+                        sh """
+                        docker rmi -f \$(docker images "${REGISTRY}/${OWNER}/${IMAGE}:${TAG}" --format "{{.ID}}")
+                        """
+                    }
+                }
+            }
+    }
+    post {
+        success {
+            script {
+                // Safe helpers (avoid failing email if git info missing)
+                def branch      = (env.GIT_BRANCH ?: 'unknown')
+                def body ='''<pre>
+✅ Build Succeeded
+
+Project     : ${PROJECT_NAME}
+Build       : #${BUILD_NUMBER}
+Branch      : ${ENV, var="BRANCH_NAME"}${ENV, var="GIT_BRANCH"}
+Commit      : ${ENV, var="GIT_COMMIT"}
+Build Node  : ${ENV, var="NODE_NAME"}
+URL         : ${BUILD_URL}
+
+</pre>'''       
+                emailext(
+                to: env.SUCCESS_EMAIL ?: 'admin@example.com',
+                subject: "[SUCCESS] ${env.JOB_NAME} #${env.BUILD_NUMBER} (${branch})",
+                mimeType: 'text/html',
+                attachLog: true,
+                recipientProviders: [
+                    [$class: 'DevelopersRecipientProvider'],   // optional: add devs from SCM
+                    [$class: 'CulpritsRecipientProvider']      // optional: add recent committers
+                ],
+                body: body
+                
+                )
+            }
+        }
+        failure {
+            script {
+            def shortSha = (env.GIT_COMMIT ?: '').take(7)
+            def trivySummary = ''
+            if (fileExists('trivy-report.json')) {
+                def r = readJSON file: 'trivy-report.json'
+                def vulns = (r?.Results ?: []).collectMany { it?.Vulnerabilities ?: [] }
+                def crit = vulns.count { it?.Severity == 'CRITICAL' }
+                def high = vulns.count { it?.Severity == 'HIGH' }
+                trivySummary = "- Trivy: ${crit} CRITICAL, ${high} HIGH\n"
+            }
+
+            def title = "[CI] ${env.JOB_NAME} #${env.BUILD_NUMBER} failed (${shortSha})"
+            def body  = """Build failed.
+
+- Job: ${env.JOB_NAME}
+- Build: #${env.BUILD_NUMBER}
+- Branch: ${env.GIT_BRANCH}
+- Commit: ${env.GIT_COMMIT}
+- URL: ${env.BUILD_URL}console
+${trivySummary}
+(Automated issue created by Jenkins)"""
+
+            // --- Resolve label names to IDs (create if missing) ---
+            def labelNames = (env.GITEA_FAILURE_LABELS ?: '')
+                                .split(',')
+                                .collect { it.trim() }
+                                .findAll { it }
+            labelNames << "branch:${env.GIT_BRANCH ?: 'main'}"  // add branch label
+            def labelIds = []
+            if (labelNames) {
+                def listResp = httpRequest(
+                httpMode: 'GET',
+                url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/labels?limit=100",
+                authentication: env.GITEA_CRED,
+                acceptType: 'APPLICATION_JSON',
+                validResponseCodes: '200'
+                )
+                def existing = readJSON text: listResp.content
+
+                labelNames.each { name ->
+                def match = existing.find { it.name == name }
+                if (!match) {
+                    // create a simple neutral color if absent
+                    def createResp = httpRequest(
+                    httpMode: 'POST',
+                    url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/labels",
+                    authentication: env.GITEA_CRED,
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    requestBody: groovy.json.JsonOutput.toJson([ name: name, color: "#ededed" ]),
+                    validResponseCodes: '201'
+                    )
+                    match = readJSON text: createResp.content
+                    existing << match
+                }
+                labelIds << match.id
+                }
+            }
+
+            def branchRef = (env.CHANGE_TARGET ?: env.GIT_BRANCH ?: env.BRANCH_NAME ?: '')
+                   .replaceFirst('^origin/', '')
+                   .replaceFirst('^refs/heads/', '')
+
+            // --- Build payload (only include fields Gitea will accept) ---
+            def payload = [ title: title, body: body, ref: branchRef ]
+            if (labelIds)  payload.labels    = labelIds
+        
+
+            // --- POST the issue ---
+            warnError('Failed to open Gitea issue') {
+                def res = httpRequest(
+                httpMode: 'POST',
+                url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/issues",
+                authentication: env.GITEA_CRED,
+                acceptType: 'APPLICATION_JSON',
+                contentType: 'APPLICATION_JSON',
+                requestBody: groovy.json.JsonOutput.toJson(payload),
+                validResponseCodes: '201'
+                )
+                echo "Created Gitea issue: HTTP ${res.status}"
+            }
+            }
+        }
+
+        unstable {
+            script {
+
+            def title = "[CI] ${env.JOB_NAME} #${env.BUILD_NUMBER} unstable"
+
+            def trivySummary = ''
+            if (fileExists('trivy-report.json')) {
+                def r = readJSON file: 'trivy-report.json'
+                def vulns = (r?.Results ?: []).collectMany { it?.Vulnerabilities ?: [] }
+                def crit = vulns.count { it?.Severity == 'CRITICAL' }
+                def high = vulns.count { it?.Severity == 'HIGH' }
+                trivySummary = "- Trivy: ${crit} CRITICAL, ${high} HIGH\n"
+            }
+
+            def body  = """Build became UNSTABLE.
+
+- Job: ${env.JOB_NAME}
+- Build: #${env.BUILD_NUMBER}
+- Branch: ${env.GIT_BRANCH}
+- Commit: ${env.GIT_COMMIT}
+- URL: ${env.BUILD_URL}console
+
+${trivySummary}
+(Triggered by vulnerability gate or similar)"""
+
+            
+
+            // --- Resolve label names to IDs (create if missing) ---
+            def labelNames = (env.GITEA_UNSTABLE_LABELS ?: '')
+                                .split(',')
+                                .collect { it.trim() }
+                                .findAll { it }
+            labelNames << "branch:${env.GIT_BRANCH ?: 'main'}"  // add branch label
+            def labelIds = []
+            if (labelNames) {
+                def listResp = httpRequest(
+                httpMode: 'GET',
+                url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/labels?limit=100",
+                authentication: env.GITEA_CRED,
+                acceptType: 'APPLICATION_JSON',
+                validResponseCodes: '200'
+                )
+                def existing = readJSON text: listResp.content
+
+                labelNames.each { name ->
+                def match = existing.find { it.name == name }
+                if (!match) {
+                    // create a simple neutral color if absent
+                    def createResp = httpRequest(
+                    httpMode: 'POST',
+                    url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/labels",
+                    authentication: env.GITEA_CRED,
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    requestBody: groovy.json.JsonOutput.toJson([ name: name, color: "#ededed" ]),
+                    validResponseCodes: '201'
+                    )
+                    match = readJSON text: createResp.content
+                    existing << match
+                }
+                labelIds << match.id
+                }
+            }
+
+            def branchRef = (env.CHANGE_TARGET ?: env.GIT_BRANCH ?: env.BRANCH_NAME ?: '')
+                   .replaceFirst('^origin/', '')
+                   .replaceFirst('^refs/heads/', '')
+
+            def payload = [ title: title,
+                            body : body, 
+                            ref: branchRef,]
+            if (labelIds)  payload.labels    = labelIds
+
+            warnError('Failed to open Gitea unstable issue') {
+                    httpRequest(
+                    httpMode: 'POST',
+                    url: "${env.GITEA_API}/repos/${env.GITEA_OWNER}/${env.GITEA_REPO}/issues",
+                    authentication: env.GITEA_CRED,
+                    acceptType: 'APPLICATION_JSON',
+                    contentType: 'APPLICATION_JSON',
+                    requestBody: groovy.json.JsonOutput.toJson(payload),
+                    validResponseCodes: '201'
+                    )
+                }
+            }
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}

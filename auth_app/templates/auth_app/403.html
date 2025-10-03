@@ -1,0 +1,18 @@
+{% extends "auth_app/base.html" %}
+{% load static %}
+
+{% block title %}403 – Forbidden{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <div class="centered-content">
+        <img src="{% static 'app/icons/favicon.ico' %}" alt="BulkIntel Icon">
+        <h2>403 – Forbidden</h2>
+    </div>
+
+    <p>You don’t have permission to access this resource.<br>
+       Maybe try the login page?</p>
+
+    <a href="{% url 'login' %}" class="btn">Back to login</a>
+</div>
+{% endblock %}

@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bulkintel
+  namespace: bulkintel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: bulkintel
+  template:
+    metadata:
+      labels:
+        app: bulkintel
+      annotations:
+        vault.hashicorp.com/agent-inject: 'true'
+        vault.hashicorp.com/role: 'bulkintel-prod-role'
+        vault.hashicorp.com/agent-inject-secret-config: 'key-value/data/bulkintel-prod'
+        vault.hashicorp.com/agent-pre-populate: "true"
+        vault.hashicorp.com/agent-init-first: "true"
+        # Environment variable export template
+        vault.hashicorp.com/agent-inject-template-config: |
+          {{- with secret "key-value/data/bulkintel-prod" -}}
+            export ABUSEIPDB_KEY="{{ .Data.data.ABUSEIPDB_KEY }}"
+            export ABUSEIPDB_KEY1="{{ .Data.data.ABUSEIPDB_KEY1 }}"
+            export ABUSEIPDB_KEY2="{{ .Data.data.ABUSEIPDB_KEY2 }}"
+            export ALLOWED_HOSTS="{{ .Data.data.ALLOWED_HOSTS }}"
+            export BIG_DATA_USERAGENT_KEY="{{ .Data.data.BIG_DATA_USERAGENT_KEY }}"
+            export CSRF_TRUSTED_ORIGINS="{{ .Data.data.CSRF_TRUSTED_ORIGINS }}"
+            export DATABASE_URL="{{ .Data.data.DATABASE_URL }}"
+            export DJANGO_SU_EMAIL="{{ .Data.data.DJANGO_SU_EMAIL }}"
+            export DJANGO_SU_NAME="{{ .Data.data.DJANGO_SU_NAME }}"
+            export DJANGO_SU_PASS="{{ .Data.data.DJANGO_SU_PASS }}"
+            export IBM_XFORCE_KEY="{{ .Data.data.IBM_XFORCE_KEY }}"
+            export IBM_XFORCE_PASSWORD="{{ .Data.data.IBM_XFORCE_PASSWORD }}"
+            export POSTGRES_DB="{{ .Data.data.POSTGRES_DB }}"
+            export POSTGRES_HOST="{{ .Data.data.POSTGRES_HOST }}"
+            export POSTGRES_PASSWORD="{{ .Data.data.POSTGRES_PASSWORD }}"
+            export POSTGRES_USER="{{ .Data.data.POSTGRES_USER }}"
+            export REDIS_HOST="{{ .Data.data.REDIS_HOST }}"
+            export REDIS_PORT="{{ .Data.data.REDIS_PORT }}"
+            export SECRET_KEY="{{ .Data.data.SECRET_KEY }}"
+            export VIRUSTOTAL_KEY="{{ .Data.data.VIRUSTOTAL_KEY }}"
+            export REDIS_USER="{{ .Data.data.REDIS_USER }}"
+            export REDIS_PASSWORD="{{ .Data.data.REDIS_PASSWORD }}"
+          {{- end }}
+    spec:
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 1000
+      serviceAccountName: bulkintel-prod-sa
+      initContainers:
+        - name: postgresql-isready
+          image: "docker.io/library/postgres:16-alpine"
+          imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsUser: 999
+            runAsGroup: 999
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Load the Vault‑injected envs
+              . /vault/secrets/config
+              echo "Waiting for Postgres at $POSTGRES_HOST ..."
+              # Loop until the DB answers
+              until pg_isready \
+                      -U "$POSTGRES_USER" \
+                      -d "dbname=$POSTGRES_DB" \
+                      -h "$POSTGRES_HOST" \
+                      -p 5432 ; do
+                  sleep 2
+              done
+              echo "Postgres is up."
+      containers:
+      - name: bulkintel
+        image: git.example.com/jenkins/bulkintel-dev:d018d14028d403f530db471050e7e72c7e995f4c
+        securityContext:
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+        resources:
+          requests:
+            cpu: "250m" # Minimum CPU resources required
+            memory: "512Mi" # Minimum Memory resources allowed
+          limits:
+            cpu: "500m" # Maximum CPU resources allowed
+            memory: "1024Mi" # Maximum Memory resources allowed
+        command: ["/bin/sh","-c"]
+        args: ['source /vault/secrets/config && /code/entrypoint.sh']
+        ports:
+        - containerPort: 80
+        livenessProbe:
+          httpGet:
+            path: /healthz/
+            port: 80
+            scheme: HTTP
+            httpHeaders:
+              - name: Host
+                value: localhost     # avoids Django ALLOWED_HOSTS issues
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz/
+            port: 80
+            scheme: HTTP
+            httpHeaders:
+              - name: Host
+                value: localhost
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /healthz/
+            port: 80
+            scheme: HTTP
+            httpHeaders:
+              - name: Host
+                value: localhost
+          # Budget ~5 minutes for migrations/warmup (5s * 60 failures)
+          periodSeconds: 5
+          failureThreshold: 60
+          timeoutSeconds: 2

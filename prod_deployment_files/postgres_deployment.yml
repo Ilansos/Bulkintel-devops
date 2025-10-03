@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-statefulset
+  namespace: bulkintel
+spec:
+  serviceName: "postgres-service"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+      annotations:
+        vault.hashicorp.com/agent-inject: 'true'
+        vault.hashicorp.com/role: 'bulkintel-prod-role'
+        vault.hashicorp.com/agent-inject-secret-config: 'key-value/data/bulkintel-prod'
+        vault.hashicorp.com/agent-pre-populate: "true"
+        vault.hashicorp.com/agent-init-first: "true"
+        # Environment variable export template
+        vault.hashicorp.com/agent-inject-template-config: |
+          {{- with secret "key-value/data/bulkintel-prod" -}}
+            export POSTGRES_DB="{{ .Data.data.POSTGRES_DB }}"
+            export POSTGRES_PASSWORD="{{ .Data.data.POSTGRES_PASSWORD }}"
+            export POSTGRES_USER="{{ .Data.data.POSTGRES_USER }}"
+          {{- end }}
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+      serviceAccountName: bulkintel-prod-sa
+      containers:
+      - name: postgres
+        image: postgres:16
+        securityContext:
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+        command: ["/bin/bash", "-ec"]
+        args:
+          - |
+            source /vault/secrets/config          # ← loads envs
+            exec docker-entrypoint.sh postgres   # ← original entrypoint
+        resources:
+          requests:
+            memory: "334Mi"
+            cpu: "50m"
+          limits:
+            memory: "334Mi"
+            cpu: "80m"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "${POSTGRES_USER}"]
+          initialDelaySeconds: 80
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 5
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "${POSTGRES_USER}"]
+          initialDelaySeconds: 80
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        namespace: bulkintel
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: nfs-csi
+        resources:
+          requests:
+            storage: 5Gi

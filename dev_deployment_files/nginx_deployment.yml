@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: bulkintel-dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+      annotations:
+        # Enable injector
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "nginx-role"
+        vault.hashicorp.com/agent-pre-populate: "true"
+        vault.hashicorp.com/agent-init-first: "true"
+        vault.hashicorp.com/agent-cache-enable: "true"
+        # RE-RENDER STATIC SECRETS PERIODICALLY (required for pki/issue)
+        vault.hashicorp.com/template-static-secret-render-interval: "10m"
+        # --- Issue the cert (same params in both templates → served from cache) ---
+
+        # Certificate (full chain)
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki/issue/nginx-internal"
+        vault.hashicorp.com/agent-inject-perms-tls.crt: "0444"
+        vault.hashicorp.com/agent-inject-template-tls.crt: |
+          {{- with secret "pki/issue/nginx-internal" 
+               "common_name=bulkintel-dev.example.com" 
+               "alt_names=bulkintel-dev.example.com"
+               "ttl=24h" -}}
+          {{ .Data.certificate }}
+          {{- range .Data.ca_chain }}
+          {{ . }}
+          {{- end }}
+          {{- end }}
+
+        # Private key
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki/issue/nginx-internal"
+        vault.hashicorp.com/agent-inject-perms-tls.key: "0400"
+        vault.hashicorp.com/agent-inject-template-tls.key: |
+          {{- with secret "pki/issue/nginx-internal" 
+               "common_name=bulkintel-dev.example.com" 
+               "alt_names=bulkintel-dev.example.com"
+               "ttl=24h" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+        # Prometheus pod-scrape anotations
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4040"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: nginx-vault-sa
+      securityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+        runAsGroup: 0
+      automountServiceAccountToken: true
+      containers:
+      - name: nginx
+        image: nginx:1.29
+        securityContext:
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
+        resources:
+          requests:
+            cpu: "50m" # Minimum CPU resources required
+            memory: "256Mi"
+            ephemeral-storage: "256Mi"
+          limits:
+            cpu: "200m" # Maximum CPU resources allowed
+            memory: "512Mi"
+            ephemeral-storage: "1Gi"
+        command: ["/bin/sh","/entrypoint.sh"]
+        ports:
+        - containerPort: 443
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: nginx-config
+          mountPath: /entrypoint.sh
+          subPath: entrypoint.sh
+          readOnly: true
+        - name: nginx-logs
+          mountPath: /var/log/nginx
+      - name: nginxlog-exporter
+        image: ghcr.io/martin-helmich/prometheus-nginxlog-exporter/exporter:v1
+        resources:
+          requests:
+            cpu: "50m" # Minimum CPU resources required
+            memory: "256Mi"
+            ephemeral-storage: "256Mi"
+          limits:
+            cpu: "200m" # Maximum CPU resources allowed
+            memory: "512Mi"
+        args: ["-config-file", "/etc/promexp/config.hcl"]
+        ports:
+          - name: metrics
+            containerPort: 4040
+        volumeMounts:
+          - name: exporter-config
+            mountPath: /etc/promexp
+          - name: nginx-logs
+            mountPath: /var/log/nginx
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      - name: exporter-config
+        configMap:
+          name: nginxlog-exporter-config
+      - name: nginx-logs
+        emptyDir: {}

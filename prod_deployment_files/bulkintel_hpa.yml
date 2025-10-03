@@ -1,0 +1,40 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bulkintel-hpa
+  namespace: bulkintel
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bulkintel
+  minReplicas: 1
+  maxReplicas: 3
+  # Set up behavior for scaling up and down
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent   # grow at most 50 % every 60 s
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+  # --- METRICS ---
+  metrics:
+  - type: Resource          # CPU target
+    resource:
+      name: cpu
+      target:
+        type: Utilization   # % of the CPU *request*
+        averageUtilization: 70
+  - type: Resource          # Memory target
+    resource:
+      name: memory
+      target:
+        type: Utilization   # % of the Memory *request*
+        averageUtilization: 70

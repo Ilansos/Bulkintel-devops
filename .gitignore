@@ -1,0 +1,16 @@
+.venv/
+nginx-cert-secret.yml
+role_id
+secret_id
+vault/
+rendered/
+docker-compose.*
+*_Root.crt
+tls.crt
+tls.key
+export_secrets.sh
+dev_deployment_files/.cache/
+dev_deployment_files/trivy-reports/
+prod_deployment_files/.cache/
+prod_deployment_files/trivy-reports/
+prod_deployment_files/terraform_deployment/.terraform

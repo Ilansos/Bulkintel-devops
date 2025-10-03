@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: nginx-config
+    namespace: bulkintel
+data:
+    nginx.conf: |
+        events {}
+        http {
+            log_format prom_json escape=json
+            '{'
+                '"time_local":"$time_local",'
+                '"remote_addr":"$remote_addr",'
+                '"remote_user":"$remote_user",'
+                '"method":"$request_method",'
+                '"uri":"$uri",'                       
+                '"args":"$args",'                     
+                '"status":$status,'
+                '"body_bytes_sent":$body_bytes_sent,'
+                '"http_referer":"$http_referer",'
+                '"http_user_agent":"$http_user_agent",'
+                '"http_x_forwarded_for":"$http_x_forwarded_for",'
+                '"request_time":$request_time,'
+                '"upstream_response_time":"$upstream_response_time",'
+                '"request_length":$request_length,'
+                '"host":"$host",'
+                '"server_name":"$server_name",'
+                '"upstream_addr":"$upstream_addr"'
+            '}';
+
+            access_log /var/log/nginx/access.log prom_json;
+
+            # Stdout log (for k8s logging)
+            access_log /dev/stdout;
+
+            server {
+                listen 80;
+                server_name bulkintel.external.com bulkintel.example.com;
+                
+                location / {
+                    return 301 https://$host$request_uri;
+                }
+            }
+
+            server {
+                listen 443 ssl;
+                server_name bulkintel.external.com bulkintel.example.com;
+
+                ssl_certificate     /vault/secrets/tls.crt;
+                ssl_certificate_key /vault/secrets/tls.key;
+
+
+                # Strong SSL security settings
+                ssl_protocols TLSv1.3;
+                ssl_ciphers HIGH:!aNULL:!MD5;
+                ssl_prefer_server_ciphers on;
+                ssl_session_cache shared:SSL:10m;
+                ssl_session_timeout 10m;
+
+
+                # Enable HSTS
+                add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+                
+                # Set max upload body size
+                client_max_body_size 100m;
+
+                location / {
+                    proxy_pass http://bulkintel-service:80;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+
+                    proxy_connect_timeout 60s;
+                    proxy_read_timeout 120s;
+                    proxy_send_timeout 120s;
+
+                    # Enable WebSockets
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "Upgrade";
+                    
+                    # Retry upstream failures
+                    proxy_next_upstream error timeout invalid_header http_502 http_503 http_504;
+                    proxy_next_upstream_tries 3;
+
+                    # Fallback for upstream failure
+                    error_page 502 503 504 = @fallback;
+                }
+
+                location @fallback {
+                    default_type text/plain;
+                    return 502 "Upstream service unavailable. Please try again later.";
+                }
+            }
+        }
+    entrypoint.sh: |
+        #!/bin/sh
+        set -eu
+
+        wait_files() {
+        until [ -s /vault/secrets/tls.crt ] && [ -s /vault/secrets/tls.key ]; do
+            echo "[wait] tls files not ready..."; sleep 0.2
+        done
+        }
+
+        fingerprint() { cat /vault/secrets/tls.crt /vault/secrets/tls.key | sha256sum 2>/dev/null || cksum; }
+
+        match_pair() {
+        C=$(openssl x509 -in /vault/secrets/tls.crt -noout -modulus 2>/dev/null || true)
+        K=$(openssl rsa -in /vault/secrets/tls.key -noout -modulus 2>/dev/null \
+            || openssl pkey -in /vault/secrets/tls.key -noout -modulus 2>/dev/null || true)
+        [ -n "$C" ] && [ -n "$K" ] && [ "$C" = "$K" ]
+        }
+
+        wait_files
+        OLD=$(fingerprint)
+
+        # start nginx in background
+        nginx -g "daemon off;" -c /etc/nginx/nginx.conf &
+        NGINX_PID=$!
+
+        # poll for changes
+        while sleep 5; do
+        NEW=$(fingerprint)
+        if [ "$NEW" != "$OLD" ]; then
+            echo "[watch] cert/key changed; validating and reloading..."
+            if match_pair && nginx -t -c /etc/nginx/nginx.conf; then
+            kill -HUP "$NGINX_PID" || nginx -s reload
+            echo "[watch] nginx reloaded."
+            OLD=$NEW
+            else
+            echo "[watch] validation failed; skipping reload."
+            fi
+        fi
+        done

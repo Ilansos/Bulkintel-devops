@@ -1,0 +1,217 @@
+body {
+    font-family: Arial, sans-serif;
+    background-color: #000000;
+    margin: 0;
+    padding: 20px;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.app-icon {
+    height: 90px; /* Adjust size as needed */
+}
+
+.input-section,
+.results-section,
+.leaderboard-card,
+.leaderboard-body {
+  max-width: 2400px;     /* tweak to taste */
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.user-info, .input-section, .results-section {
+    background: rgba(245, 245, 245, 0.9); /* Light grey with transparency */
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.user-info {
+    background-color: rgba(249, 249, 249, 0.788);
+    padding: 2px 4px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.user-info p {
+    margin: 0;
+    font-size: 18px;
+    color: #333;
+}
+
+.input-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: auto;
+    width: 100%;
+}
+
+.ip-textarea {
+    width: 100%;
+    height: 100px;
+    padding: 10px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    box-sizing: border-box;
+    font-size: 16px;
+}
+
+.buttons-container {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+}
+
+.check-button, .logout-button {
+    border: none;
+    color: white;
+    padding: 12px 24px;
+    text-align: center;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 16px;
+    margin: 8px 4px;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: background-color 0.3s, box-shadow 0.3s, transform 0.2s;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+.check-button {
+    background-color: #022538;
+}
+
+.check-button:hover {
+    background-color: #0056b3;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    transform: scale(1.05);
+}
+
+.logout-button {
+    background-color: #8d1723;
+}
+
+.logout-button:hover {
+    background-color: #c82333;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+    transform: scale(1.05);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 10px 15px;
+    text-align: center;
+}
+
+th {
+    background-color: #f2f2f2;
+    color: #333;
+}
+
+tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+tr:hover {
+    background-color: #e1f5fe;
+}
+
+/* Loading spinner (CSS-only) */
+.spinner {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(0,0,0,0.15);
+  border-top-color: rgba(0,0,0,0.65);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.check-button:disabled { opacity: 0.6; cursor: not-allowed; }
+.error-box {
+  padding: .75rem; border: 1px solid #f5c2c7; background: #f8d7da; border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+/* Card that wraps title, controls, and table together */
+.leaderboard-card {
+  background: rgba(245, 245, 245, 0.9);
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  overflow: hidden;              /* keeps rounded corners with header/table */
+  margin-top: 20px;
+}
+
+/* Header row: title on the left, controls on the right */
+.leaderboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #ddd;
+  background: rgba(249, 249, 249, 0.95);
+}
+
+.leaderboard-title {
+  margin: 0;
+  font-size: 20px;
+  color: #333;
+}
+
+/* Controls aligned to the right */
+.leaderboard-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.leaderboard-controls select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  background: #fff;
+}
+
+/* Body that contains the table/spinner; no black gap */
+.leaderboard-body {
+  padding: 0;                    /* table already spans full width */
+}
+
+/* Optional tighter table header look inside the card */
+.leaderboard-body table thead th {
+  background-color: #f2f2f2;
+}
+
+.leaderboard-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 72px;       /* gives it some vertical presence */
+    text-align: center;
+    padding: 12px 16px;
+    font-size: 20px;        /* same as .leaderboard-title */
+    font-weight: 700;       /* same bold look as the title */
+    color: #333;
+}

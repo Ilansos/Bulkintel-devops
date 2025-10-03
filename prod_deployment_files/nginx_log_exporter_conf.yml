@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginxlog-exporter-config
+  namespace: bulkintel
+data:
+  config.hcl: |
+    listen { port = 4040 }
+
+    namespace "nginx" {
+      # JSON parser instead of raw format
+      parser = "json"
+      source { files = ["/var/log/nginx/access.log"] }
+
+      # Do NOT set "namespace" here; Prometheus will add pod/namespace labels.
+      labels { app = "nginx" namespace = "bulkintel" }
+
+      # vhost and upstream are handy
+      relabel "vhost"    { from = "host" }
+      relabel "upstream" { from = "upstream_addr" }
+
+      # Route: use JSON "uri" (already queryless); normalize to a few buckets
+      relabel "route" { from = "uri" }
+      
+
+      # ⚠ High-cardinality: client IP. Prefer real client from XFF's first hop; fallback is $remote_addr.
+      # If XFF exists, take first value before comma:
+      relabel "client_ip" {
+        from = "http_x_forwarded_for"
+        separator = ","
+        split = 1
+      }
+      # If XFF was empty, "client_ip" will be empty; add also remote_addr (you can keep both or drop one)
+      relabel "remote_addr" { from = "remote_addr" }
+    }

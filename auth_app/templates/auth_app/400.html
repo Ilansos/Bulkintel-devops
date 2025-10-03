@@ -1,0 +1,18 @@
+{% extends "auth_app/base.html" %}
+{% load static %}
+
+{% block title %}400 – Bad request{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <div class="centered-content">
+        <img src="{% static 'app/icons/favicon.ico' %}" alt="BulkIntel Icon">
+        <h2>400 – Bad request</h2>
+    </div>
+
+    <p>The request could not be understood.<br>
+       Maybe try the login page?</p>
+
+    <a href="{% url '/' %}" class="btn">Back to login</a>
+</div>
+{% endblock %}
