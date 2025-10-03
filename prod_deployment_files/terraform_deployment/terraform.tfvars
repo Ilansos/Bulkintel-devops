@@ -19,7 +19,7 @@ ssh_keys = [ {
   path = "/tmp/bulkintel_proxy.pub"
 } ]
 
-home_ip_cidr = "46.121.141.251/32"
+home_ip_cidr = "1.1.1.1/32"
 
 partner_mobile_ips = "2.52.0.0/14"
 
@@ -33,7 +33,6 @@ ec2_instance = {
   root_volume_size = 20
   volume_type = "gp3"
   delete_on_termination = true
-  # user_data_file = "/home/ilans/Documents/devsecops_course/Bulk_Intel/dev_deployment_files/terraform_deployment/set_up_nginx.sh"
   user_data_file = "./user_data.sh"
 }
 

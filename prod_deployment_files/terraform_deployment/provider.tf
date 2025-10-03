@@ -9,7 +9,7 @@ terraform {
   required_version = ">= 1.2.0"
 
   backend "s3" {  
-    bucket       = "bulkintel-proxy-terraform-state"  
+    bucket       = "bulkintel-bucket"  
     key          = "terraform/statefile.tfstate"  
     region       = "il-central-1"  
     encrypt      = true  

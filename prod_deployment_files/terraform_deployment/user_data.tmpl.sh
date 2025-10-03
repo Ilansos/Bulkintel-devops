@@ -68,7 +68,7 @@ systemctl restart wg-quick@wg0
 
 # --- Add DNS record to /etc/hosts ---
 IP=10.0.0.175
-HOST=bulkintel.home.lab
+HOST=bulkintel.example.com
 
 if ! grep -qE "^[[:space:]]*${IP}[[:space:]]+${HOST}([[:space:]]|$)" /etc/hosts; then
   echo "${IP} ${HOST}" >> /etc/hosts
@@ -78,7 +78,7 @@ fi
 cat >/etc/cron.d/wg-watch <<'EOF'
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-* * * * * root /usr/bin/curl -sS -k --max-time 10 -o /dev/null https://bulkintel.home.lab/; rc=$?; [ $rc -eq 28 ] && /usr/bin/logger -t wg-watch "Timeout (rc=$rc), restarting wg-quick@wg0" && /usr/bin/systemctl restart wg-quick@wg0
+* * * * * root /usr/bin/curl -sS -k --max-time 10 -o /dev/null https://bulkintel.example.com/; rc=$?; [ $rc -eq 28 ] && /usr/bin/logger -t wg-watch "Timeout (rc=$rc), restarting wg-quick@wg0" && /usr/bin/systemctl restart wg-quick@wg0
 EOF
 
 chmod 0644 /etc/cron.d/wg-watch
